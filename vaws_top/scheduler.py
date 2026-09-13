@@ -231,9 +231,11 @@ class AdaptiveScheduler:
 
     def _collect_one(self, server, include_infra):
         # Measure within the actual worker, excluding time queued in the pool.
-        started = time.monotonic()
+        # perf_counter is monotonic and uses QPC on Windows Python 3.11/3.12;
+        # time.monotonic there has a 15.625 ms GetTickCount64 resolution.
+        started = time.perf_counter()
         try:
             with get_recorder("vaws-top").operation("top.probe", level="DEBUG"):
                 return self.probe.collect(server, include_infra)
         except Exception as exc:
-            raise _ProbeFailure(exc, round((time.monotonic() - started) * 1000, 3)) from exc
+            raise _ProbeFailure(exc, round((time.perf_counter() - started) * 1000, 3)) from exc
