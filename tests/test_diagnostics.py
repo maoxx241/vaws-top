@@ -16,8 +16,9 @@ def records(root):
 
 
 @pytest.fixture
-def diagnostic_root(tmp_path):
+def diagnostic_root(tmp_path, monkeypatch):
     root = tmp_path / "diagnostics"
+    monkeypatch.setenv("VAWS_DIAGNOSTICS_ROOT", str(root))
     rec = configure("vaws-top", root=root, level="DEBUG")
     yield root
     rec.close()
@@ -128,3 +129,19 @@ def test_diagnostics_with_global_flags_does_not_contact_monitor(diagnostic_root,
     monkeypatch.setattr(cli, "VawsTopClient", forbidden)
     assert cli.main(["--json", "diagnostics", "bundle", "--root", str(diagnostic_root / "empty")]) == 0
     assert json.loads(capsys.readouterr().out)["events"] == []
+
+
+def test_only_actual_argparse_errors_are_classified_caller(diagnostic_root):
+    from vaws_top.cli import main
+    from vaws_top.observability import observed
+    with pytest.raises(SystemExit) as caught:
+        main(["unknown-command"])
+    assert caught.value.code == 2
+    assert records(diagnostic_root)[-1]["attributes"]["classification"] == "caller"
+
+    @observed("top.fixture.business")
+    def business():
+        raise SystemExit(2)
+    with pytest.raises(SystemExit):
+        business()
+    assert records(diagnostic_root)[-1]["attributes"].get("classification") != "caller"

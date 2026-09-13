@@ -29,6 +29,15 @@ def observed(name, *, level="INFO"):
                 token = _ACTIVE.set(operation)
                 try:
                     result = function(*args, **kwargs)
+                except SystemExit as exc:
+                    traceback = exc.__traceback__
+                    while traceback is not None:
+                        frame = traceback.tb_frame
+                        if frame.f_globals.get("__name__") == "argparse" and frame.f_code.co_name == "error":
+                            operation.fail("argument_validation", classification="caller")
+                            break
+                        traceback = traceback.tb_next
+                    raise
                 finally:
                     _ACTIVE.reset(token)
                 if type(result) is int and result != 0:
