@@ -4,23 +4,40 @@
 
 **vaws-top 只观测，不分配。** 它不是设备分配权威：哪些 NPU 可以被使用，由宿主机侧的 NPU 协调器队列决定。vaws-top 的所有 Agent 接口都把数据标注为"带观测时间戳的观测状态"，并明确声明不得据此做设备分配决策。详见 [docs/agent-access.md](docs/agent-access.md) 与 [docs/architecture.md](docs/architecture.md)。
 
+## 诊断与故障状态
+
+CLI、MCP、HTTP、后台采集及 inventory 初始化使用零依赖的 `vaws-diagnostics`。
+该依赖固定为公开 canonical Git revision，独立 wheel/uvx 安装无需先准备 consumer
+或 knowledge；共享包的 release wheel 可用于离线依赖包。
+`VAWS_LOG_LEVEL` 控制 DEBUG/INFO/WARNING/ERROR，`VAWS_DIAGNOSTICS_ROOT` 可覆盖平台
+用户状态目录。不同进程独立写 JSONL，每段 1 MiB、保留三个轮转备份；可选诊断 worker
+按全局容量与时间保留清理旧进程日志。日志写失败保留原业务结果。
+
+采集线程失败后 `/api/health` 返回 503 和 `degraded`，runtime 包含实际线程存活状态
+和异常类型；等待新采样的调用立即得到不可用，不伪造成功。失败 probe 的耗时来自
+实际工作线程内的计时，不再写零或把排队时间当作探测时间。不会自动重放 bootstrap。
+
+`vaws-top diagnostics bundle --root PATH --output support.json` 仅离线导出严格字段
+投影与脱敏结果，不扫描宿主机、不启动服务、不上传原始 inventory、密码或命令。
+自动 issue 上报由独立启用的 reporter 负责；普通监控请求不等待网络上报。
+
 ## 安装与启动
 
-唯一版本号来自 `pyproject.toml` 的 `0.1.2`。MCP `serverInfo.version` 读取 `importlib.metadata.version("vaws-top")`；`package.json` 的 version 与之相同。
+唯一版本号来自 `pyproject.toml` 的 `0.1.3`。MCP `serverInfo.version` 读取 `importlib.metadata.version("vaws-top")`；`package.json` 的 version 与之相同。
 
 ### 推荐：GitHub Release wheel（无需本机 Node）
 
 Release 资产里的 wheel 已打入前端构建产物。私有仓库下载需要已登录的 `gh` 或 `GITHUB_TOKEN`。
 
 ```bash
-gh release download v0.1.2 -R vllm-ascend-workspace/vaws-top -p '*.whl'
-uvx --from ./vaws_top-0.1.2-py3-none-any.whl vaws-top serve
+gh release download v0.1.3 -R vllm-ascend-workspace/vaws-top -p '*.whl'
+uvx --from ./vaws_top-0.1.3-py3-none-any.whl vaws-top serve
 ```
 
 或在已具备仓库读权限的环境里直接指向资产 URL：
 
 ```bash
-uvx --from "https://github.com/vllm-ascend-workspace/vaws-top/releases/download/v0.1.2/vaws_top-0.1.2-py3-none-any.whl" vaws-top serve
+uvx --from "https://github.com/vllm-ascend-workspace/vaws-top/releases/download/v0.1.3/vaws_top-0.1.3-py3-none-any.whl" vaws-top serve
 ```
 
 浏览器访问 `http://127.0.0.1:8788`。`vaws-top serve` 单进程同时提供 HTTP API 与静态前端，默认只绑 loopback。`python -m vaws_top` 与 `vaws-top` 等价。
@@ -52,7 +69,7 @@ cd vaws-top
       "command": "uvx",
       "args": [
         "--from",
-        "https://github.com/vllm-ascend-workspace/vaws-top/releases/download/v0.1.2/vaws_top-0.1.2-py3-none-any.whl",
+        "https://github.com/vllm-ascend-workspace/vaws-top/releases/download/v0.1.3/vaws_top-0.1.3-py3-none-any.whl",
         "vaws-top",
         "mcp"
       ],

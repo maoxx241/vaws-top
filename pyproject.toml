@@ -4,11 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "vaws-top"
-version = "0.1.2"
+version = "0.1.3"
 description = "Local-only Ascend NPU fleet monitor"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
+dependencies = ["vaws-diagnostics @ git+https://github.com/vllm-ascend-workspace/vaws-diagnostics@3595e4e5ae776a1728099f237792ffb022ae12c8"]
 authors = [{ name = "vllm-ascend-workspace" }]
 
 [project.scripts]
@@ -17,6 +18,9 @@ vaws-top = "vaws_top.cli:main"
 [project.urls]
 Homepage = "https://github.com/vllm-ascend-workspace/vaws-top"
 Repository = "https://github.com/vllm-ascend-workspace/vaws-top"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["vaws_top"]

@@ -6,6 +6,7 @@ import os
 import sys
 
 from . import __version__
+from .observability import observed, capture_failure
 from .client import (
     ClientError, VawsTopClient, format_capacity, format_mounts, format_npu, format_server, format_servers,
 )
@@ -29,6 +30,8 @@ def parser() -> argparse.ArgumentParser:
     serve.add_argument("--bind", default=None, help="listen address (default: 127.0.0.1)")
     serve.add_argument("--port", type=int, default=None, help="listen port (default: 8788)")
     sub.add_parser("mcp", help="stdio MCP server")
+    diagnostics = sub.add_parser("diagnostics", help="local diagnostic export and configured reporting")
+    diagnostics.add_argument("arguments", nargs=argparse.REMAINDER)
     sub.add_parser("servers", help="list monitored servers")
     npu = sub.add_parser("npu", help="show cached NPU status by IP, hostname, name, or server id")
     npu.add_argument("host")
@@ -58,8 +61,16 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
+@observed("top.cli")
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["diagnostics"]:
+        from vaws_diagnostics.cli import main as diagnostics_main
+        return diagnostics_main(argv[1:])
     args = parser().parse_args(argv)
+    if args.command == "diagnostics":
+        from vaws_diagnostics.cli import main as diagnostics_main
+        return diagnostics_main(args.arguments)
     if args.command == "serve":
         if args.bind:
             os.environ["NFM_BIND"] = args.bind
@@ -104,5 +115,6 @@ def main(argv: list[str] | None = None) -> int:
         print(output)
         return 0
     except ClientError as exc:
+        capture_failure(exc, "monitor_unavailable")
         print(str(exc), file=sys.stderr)
         return 2

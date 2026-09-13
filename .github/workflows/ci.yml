@@ -26,14 +26,14 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Install package
-        run: python3 -m pip install .
+        run: python3 -m pip install . "pytest>=8,<10"
       - name: Run backend unit tests against the installed package
         working-directory: ${{ runner.temp }}
         env:
           HOME: ${{ runner.temp }}/empty-home
         run: |
           mkdir -p "$HOME"
-          python3 -m unittest discover -s "${{ github.workspace }}/tests" -v
+          python3 -m pytest -q "${{ github.workspace }}/tests"
 
   frontend-build:
     name: frontend lint and build

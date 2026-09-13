@@ -5,6 +5,7 @@ import sys
 from typing import Any
 
 from . import __version__
+from .observability import observed, capture_failure
 from .client import ClientError, VawsTopClient, format_capacity, format_mounts, format_npu, format_server, format_servers
 
 
@@ -106,6 +107,7 @@ def _meta_version(request: dict[str, Any]) -> str | None:
     return meta.get("io.modelcontextprotocol/protocolVersion") if isinstance(meta, dict) else None
 
 
+@observed("top.mcp.request", level="DEBUG")
 def handle_request(request: dict[str, Any], client: VawsTopClient) -> dict[str, Any] | None:
     request_id = request.get("id")
     method = request.get("method")
@@ -180,11 +182,14 @@ def handle_request(request: dict[str, Any], client: VawsTopClient) -> dict[str, 
             return {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": f"method not found: {method}"}}
         return {"jsonrpc": "2.0", "id": request_id, "result": result}
     except ClientError as exc:
+        capture_failure(exc, "monitor_unavailable")
         return {"jsonrpc": "2.0", "id": request_id, "result": _result(str(exc), {"error": str(exc)}, modern, True)}
     except Exception as exc:  # noqa: BLE001
+        capture_failure(exc)
         return {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32603, "message": str(exc)}}
 
 
+@observed("top.mcp")
 def main() -> int:
     try:
         client = VawsTopClient()

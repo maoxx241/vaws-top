@@ -21,6 +21,8 @@ from .db import Database
 from .device_adapter import DeviceAdapter
 from .scheduler import AdaptiveScheduler
 from .settings import Settings
+from .observability import observed, capture_failure, record_http_status
+from vaws_diagnostics import get_recorder
 
 
 RANGES = {
@@ -105,6 +107,8 @@ class App:
                 )
             except TimeoutError as exc:
                 raise AgentQueryError(str(exc), 504) from exc
+            except RuntimeError as exc:
+                raise AgentQueryError(str(exc), 503) from exc
         return server, snapshot
 
     def agent_npu(
@@ -145,11 +149,12 @@ class Handler(BaseHTTPRequestHandler):
         return self.server.app  # type: ignore[attr-defined]
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        if self.path.startswith("/api/viewers/"):
-            return
-        super().log_message(fmt, *args)
+        # Request targets may carry user text/credentials. Never copy them to
+        # diagnostics; each handler records outcome and elapsed time separately.
+        get_recorder("vaws-top").event("DEBUG", "http.response", method=self.command)
 
     def _headers(self, status: int, content_type: str, length: int | None = None) -> None:
+        record_http_status(status)
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Cache-Control", "no-store" if self.path.startswith("/api/") else "public, max-age=300")
@@ -200,13 +205,16 @@ class Handler(BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:  # noqa: N802
         self.do_GET()
 
+    @observed("top.http.get", level="DEBUG")
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         if parsed.path == "/api/health":
+            runtime = self.app.scheduler.runtime_state()
+            healthy = runtime.get("collector_status", "running") == "running"
             return self.json_response({
-                "status": "ok", "version": __version__, "contract": "observation-only",
-                "runtime": self.app.scheduler.runtime_state(),
-            })
+                "status": "ok" if healthy else "degraded", "version": __version__, "contract": "observation-only",
+                "runtime": runtime,
+            }, 200 if healthy else 503)
         if parsed.path == "/api/overview":
             return self.json_response(self.app.overview())
         if parsed.path == "/api/agent/servers":
@@ -222,6 +230,8 @@ class Handler(BaseHTTPRequestHandler):
                     host, include_processes, detailed_processes, query.get("mode", ["cache"])[0], timeout,
                 ))
             except AgentQueryError as exc:
+                if exc.status >= 500:
+                    capture_failure(exc, "http_request_failed")
                 return self.json_response({"error": str(exc)}, exc.status)
             except ValueError:
                 return self.json_response({"error": "timeout must be an integer"}, HTTPStatus.BAD_REQUEST)
@@ -235,6 +245,8 @@ class Handler(BaseHTTPRequestHandler):
                     int(query.get("timeout", ["30"])[0]),
                 ))
             except AgentQueryError as exc:
+                if exc.status >= 500:
+                    capture_failure(exc, "http_request_failed")
                 return self.json_response({"error": str(exc)}, exc.status)
             except ValueError:
                 return self.json_response({"error": "timeout must be an integer"}, HTTPStatus.BAD_REQUEST)
@@ -248,6 +260,8 @@ class Handler(BaseHTTPRequestHandler):
                     query.get("include_disabled", ["0"])[0] in ("1", "true", "yes"),
                 ))
             except AgentQueryError as exc:
+                if exc.status >= 500:
+                    capture_failure(exc, "http_request_failed")
                 return self.json_response({"error": str(exc)}, exc.status)
             except ValueError:
                 return self.json_response({"error": "capacity parameters must be integers"}, HTTPStatus.BAD_REQUEST)
@@ -282,6 +296,7 @@ class Handler(BaseHTTPRequestHandler):
             })
         return self._static(parsed.path)
 
+    @observed("top.http.post")
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         try:
@@ -297,9 +312,11 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as exc:
             return self.json_response({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         except Exception as exc:  # noqa: BLE001
+            capture_failure(exc, "http_request_failed")
             return self.json_response({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
         self.json_response({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
+    @observed("top.http.put", level="DEBUG")
     def do_PUT(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         try:
@@ -330,6 +347,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.json_response({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         self.json_response({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
+    @observed("top.http.delete")
     def do_DELETE(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         viewer = re.fullmatch(r"/api/viewers/([A-Za-z0-9_-]{8,80})", parsed.path)
@@ -363,13 +381,18 @@ class Handler(BaseHTTPRequestHandler):
                     "host": host, "port": port, "username": username,
                     "tags": normalize_tags(entry.get("tags", [])),
                 })
-                auth = self.app.adapter.bootstrap_with_passwords(server, passwords)
+                with get_recorder("vaws-top").operation("top.server.bootstrap") as operation:
+                    auth = self.app.adapter.bootstrap_with_passwords(server, passwords)
+                    if not auth["ok"]:
+                        operation.fail("bootstrap_failed", detail=auth.get("error"))
                 if auth["ok"]:
                     self.app.scheduler.collect_now(server["id"])
                 else:
-                    self.app.db.record_failure(server["id"], str(auth.get("error")), 0)
+                    self.app.db.record_failure(server["id"], str(auth.get("error")),
+                                               operation.summary()["duration_ms"])
                 results.append({"server": server, "auth": auth})
             except Exception as exc:  # noqa: BLE001
+                capture_failure(exc, "server_registration_failed")
                 results.append({"server": entry, "auth": {"ok": False, "error": str(exc)}})
         self.json_response({"results": results}, HTTPStatus.MULTI_STATUS)
 

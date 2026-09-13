@@ -4,6 +4,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
+from vaws_diagnostics import get_recorder, wrap_context
 
 from .db import Database
 from .probe import HostProbe
@@ -11,6 +12,12 @@ from .settings import Settings
 
 
 ALLOWED_INTERVALS = (1, 5, 10, 30)
+
+
+class _ProbeFailure(Exception):
+    def __init__(self, error: Exception, duration_ms: float):
+        super().__init__(str(error))
+        self.duration_ms = duration_ms
 
 
 class AdaptiveScheduler:
@@ -31,11 +38,14 @@ class AdaptiveScheduler:
         self._collecting = False
         self._manual: set[str] = set()
         self._force_infrastructure: set[str] = set()
+        self._fatal_error: str | None = None
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
-        self._thread = threading.Thread(target=self._run, name="nfm-collector", daemon=True)
+        self._stop.clear()
+        self._fatal_error = None
+        self._thread = threading.Thread(target=wrap_context(self._run), name="nfm-collector", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
@@ -83,6 +93,8 @@ class AdaptiveScheduler:
                 self._force_infrastructure.add(server_id)
             self._condition.notify_all()
             while not self._stop.is_set():
+                if self._fatal_error is not None:
+                    raise RuntimeError("collector failed; inspect diagnostics before restarting")
                 current = self._snapshots.get(server_id)
                 if current is not None and current is not previous:
                     return dict(current)
@@ -117,6 +129,10 @@ class AdaptiveScheduler:
                 "last_cycle_at": self._last_cycle_at,
                 "cycle_duration_ms": self._cycle_duration_ms,
                 "allowed_intervals": list(ALLOWED_INTERVALS),
+                "collector_alive": bool(self._thread and self._thread.is_alive()),
+                "collector_status": ("failed" if self._fatal_error else "stopped" if self._stop.is_set()
+                                     else "running" if self._thread and self._thread.is_alive() else "not_started"),
+                "collector_error_type": self._fatal_error,
             }
 
     def snapshots(self) -> dict[str, dict[str, Any]]:
@@ -124,6 +140,18 @@ class AdaptiveScheduler:
             return dict(self._snapshots)
 
     def _run(self) -> None:
+        # A dead collector must be visible to health and waiting callers. Do
+        # not replay bootstrap or mutate host state after an unknown failure.
+        try:
+            with get_recorder("vaws-top").operation("top.collector", level="DEBUG"):
+                self._run_loop()
+        except Exception as exc:
+            with self._condition:
+                self._fatal_error = type(exc).__name__
+                self._collecting = False
+                self._condition.notify_all()
+
+    def _run_loop(self) -> None:
         next_cycle = 0.0
         prune_at = 0.0
         while not self._stop.is_set():
@@ -169,7 +197,7 @@ class AdaptiveScheduler:
                     or server["id"] in force_infrastructure
                     or now - self._last_infra.get(server["id"], 0) >= self.settings.infrastructure_interval
                 )
-                futures[pool.submit(self.probe.collect, server, include_infra)] = (server, include_infra)
+                futures[pool.submit(wrap_context(self._collect_one), server, include_infra)] = (server, include_infra)
             for future in as_completed(futures):
                 server, include_infra = futures[future]
                 try:
@@ -177,13 +205,15 @@ class AdaptiveScheduler:
                 except Exception as exc:  # noqa: BLE001
                     failed_at = int(time.time())
                     persist_failure = failed_at - self._latest_failure_event.get(server["id"], 0) >= self.settings.history_interval
-                    self.db.record_failure(server["id"], str(exc), 0, persist_failure)
+                    duration_ms = exc.duration_ms if isinstance(exc, _ProbeFailure) else None
+                    self.db.record_failure(server["id"], str(exc), duration_ms, persist_failure)
                     if persist_failure:
                         self._latest_failure_event[server["id"]] = failed_at
                     with self._condition:
                         self._snapshots[server["id"]] = {
                             "server_id": server["id"], "collected_at": int(time.time()),
                             "status": "offline", "error": str(exc)[-1200:],
+                            "probe_duration_ms": duration_ms,
                         }
                         self._condition.notify_all()
                     continue
@@ -198,3 +228,12 @@ class AdaptiveScheduler:
                 with self._condition:
                     self._snapshots[server["id"]] = snapshot
                     self._condition.notify_all()
+
+    def _collect_one(self, server, include_infra):
+        # Measure within the actual worker, excluding time queued in the pool.
+        started = time.monotonic()
+        try:
+            with get_recorder("vaws-top").operation("top.probe", level="DEBUG"):
+                return self.probe.collect(server, include_infra)
+        except Exception as exc:
+            raise _ProbeFailure(exc, round((time.monotonic() - started) * 1000, 3)) from exc

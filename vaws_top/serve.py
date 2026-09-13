@@ -11,8 +11,11 @@ from .inventory import LOW_PRIORITY_TAG
 from .probe import HostProbe
 from .scheduler import AdaptiveScheduler
 from .settings import Settings
+from .observability import observed
+from vaws_diagnostics import get_recorder, wrap_context
 
 
+@observed("top.serve")
 def main() -> None:
     settings = Settings.load()
     settings.prepare()
@@ -32,6 +35,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, stop)
     scheduler.start()
 
+    @observed("top.inventory.import")
     def import_inventory() -> None:
         existing = {
             (item["host"], int(item["port"]), item["username"]): item
@@ -55,14 +59,18 @@ def main() -> None:
                 if tags != server_record.get("tags", []):
                     db.update_server(server_record["id"], tags=tags)
                     server_record = {**server_record, "tags": tags}
-            auth = adapter.bootstrap_with_passwords(server_record, [])
+            with get_recorder("vaws-top").operation("top.inventory.bootstrap") as operation:
+                auth = adapter.bootstrap_with_passwords(server_record, [])
+                if not auth.get("ok"):
+                    operation.fail("bootstrap_failed", detail=auth.get("error"))
             if auth.get("ok"):
                 scheduler.collect_now(server_record["id"])
             else:
-                db.record_failure(server_record["id"], str(auth.get("error") or "监控密钥不可用"), 0)
+                db.record_failure(server_record["id"], str(auth.get("error") or "监控密钥不可用"),
+                                  operation.summary()["duration_ms"])
             existing[endpoint] = server_record
 
-    threading.Thread(target=import_inventory, name="nfm-inventory-import", daemon=True).start()
+    threading.Thread(target=wrap_context(import_inventory), name="nfm-inventory-import", daemon=True).start()
     print(f"vaws-top: http://{settings.bind}:{settings.port}", flush=True)
     try:
         server.serve_forever(poll_interval=0.5)

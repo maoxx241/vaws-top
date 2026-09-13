@@ -1,0 +1,42 @@
+"""Interpret monitor outcomes without making observations an allocation source."""
+from contextvars import ContextVar
+from functools import wraps
+
+from vaws_diagnostics import get_recorder
+
+_ACTIVE = ContextVar("top_diagnostic_operation", default=None)
+
+
+def capture_failure(error, category="internal_error"):
+    operation = _ACTIVE.get()
+    if operation is not None:
+        operation.fail(category, exception=error)
+
+
+def record_http_status(status):
+    operation = _ACTIVE.get()
+    if operation is not None:
+        operation.event("WARNING" if status >= 400 else "DEBUG", "http.response", error_code=int(status))
+        if status >= 500:
+            operation.fail("http_response", error_code=int(status))
+
+
+def observed(name, *, level="INFO"):
+    def decorate(function):
+        @wraps(function)
+        def call(*args, **kwargs):
+            with get_recorder("vaws-top").operation(name, level=level) as operation:
+                token = _ACTIVE.set(operation)
+                try:
+                    result = function(*args, **kwargs)
+                finally:
+                    _ACTIVE.reset(token)
+                if type(result) is int and result != 0:
+                    operation.fail("returned_failure", exit_code=result)
+                elif isinstance(result, dict):
+                    reply = result.get("result", {})
+                    if result.get("error") or (isinstance(reply, dict) and reply.get("isError")):
+                        operation.fail("request_failed")
+                return result
+        return call
+    return decorate

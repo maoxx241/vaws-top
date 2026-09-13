@@ -194,7 +194,7 @@ class Database:
             )
         connection.commit()
 
-    def record_failure(self, server_id: str, error: str, duration_ms: int, persist_event: bool = True) -> None:
+    def record_failure(self, server_id: str, error: str, duration_ms: float | None, persist_event: bool = True) -> None:
         now = int(time.time())
         safe_error = error[-1200:]
         connection = self.connection()
