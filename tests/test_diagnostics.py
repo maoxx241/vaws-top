@@ -1,6 +1,8 @@
 """Real local collector threads and HTTP; no SSH/NPU or monitor services."""
 import http.client
 import json
+import subprocess
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -145,3 +147,30 @@ def test_only_actual_argparse_errors_are_classified_caller(diagnostic_root):
     with pytest.raises(SystemExit):
         business()
     assert records(diagnostic_root)[-1]["attributes"].get("classification") != "caller"
+
+
+@pytest.mark.parametrize("classification, error_code", [("caller", -32602), ("unknown", 503)])
+def test_public_bundle_retains_failure_classification_and_numeric_code(
+    diagnostic_root, tmp_path, classification, error_code
+):
+    from vaws_diagnostics import get_recorder
+
+    with get_recorder("vaws-top").operation("projection.fixture") as operation:
+        operation.fail("argument_validation", classification=classification, error_code=error_code)
+    output = tmp_path / "public-bundle.json"
+    proc = subprocess.run(
+        [sys.executable, "-m", "vaws_top", "diagnostics", "bundle",
+         "--root", str(diagnostic_root), "--operation-id", operation.summary()["operation_id"],
+         "--output", str(output)],
+        capture_output=True, text=True, encoding="utf-8", timeout=15,
+    )
+    assert proc.returncode == 0, proc.stderr
+    bundle = json.loads(proc.stdout)
+    assert json.loads(output.read_text(encoding="utf-8")) == bundle
+    ended = [event for event in bundle["events"] if event["event"] == "operation.end"]
+    assert len(ended) == 1
+    assert ended[0]["severity"] == "ERROR"
+    assert ended[0]["status"] == "error"
+    assert ended[0]["attributes"]["category"] == "argument_validation"
+    assert ended[0]["attributes"]["classification"] == classification
+    assert ended[0]["attributes"]["error_code"] == error_code
